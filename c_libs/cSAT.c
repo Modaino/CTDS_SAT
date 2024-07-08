@@ -2,7 +2,7 @@
  *          C\C++ library for CTDS simulations             *
  *                                                         *
  *         Written by Aron Vizkeleti on 2021-12-10         *
- *               last modified 2024-03-01                  *
+ *               last modified 2024-07-08                  *
  *                                                         *
  *      to compile use:                                    *
  *      cc -std=c99 -fPIC -shared -o cSAT.so cSAT.c        *
@@ -10,6 +10,7 @@
  *  gcc -std=c99 -m64 -fPIC -shared -o cSAT.so -O3 cSAT.c  *
  *                                                         */
 #include <math.h>
+
 #define M_PI		3.14159265358979323846
 #define M_PI_2		1.57079632679489661923
 
@@ -155,6 +156,14 @@ void get_Q(int N, int M,
 
             // Update Q_ij
             Q[i * L + j] = contribution;
+        }
+    }
+}
+
+void precompute_kmi(int N, int M, int c[], double s[], double result[]){
+    for (int m = 0; m < M; m++) {
+        for (int i = 0; i < N; i++){
+            result[m*N + i] = k_mi(m, i, s, c, N);
         }
     }
 }
@@ -397,6 +406,50 @@ void rhs11(int N, int M, int c[], double y[], double result[]){
            {
                 result[N + flat_idx(i,j, M)] = result[N + flat_idx(i,j, M)] * K_m(i, s, c, N) * K_m(j, s, c, N);
            }
+        }
+    }
+}
+
+void rhs15(int N, int M, int c[], double y[], int nbr_edge_orders, int edge_orders[], int L, int edges[], double result[]){
+    double kmi[M * N];
+    double k[M];
+    double *s = y;
+    double *gamma = y + N;
+    precompute_kmi(N, M, c, s, kmi);
+    precompute_km(N, M, c, s, k);
+    //Flat index that runs over all tensor elements
+    int overall_index = 0;
+
+    //Loop that runs over all hyper edges
+    for (int alpha = 0; alpha < nbr_edge_orders; alpha++){
+
+        // Get the relevatn indices in an array m_1, m_2, ...
+        int m_alpha_vec[edge_orders[alpha]];
+        // Calculate the product K_m1 * K_m2 * ...
+        double productum = 1.0;
+
+        for (int m_alpha_idx = 0; m_alpha_idx < edge_orders[alpha]; m_alpha_idx++){
+            m_alpha_vec[m_alpha_idx] = edges[overall_index]; //This is m_alpha
+            productum *= k[edges[overall_index]]; //This is k_{m_alpha}
+            overall_index++;
+        }
+        //Update tensor element vector field
+        //d/dt Gamma_alpha = Gamma_alpha * K_m1 * K_m2 * ...
+        result[N+alpha] = gamma[alpha] * productum;
+
+        //Update the soft-spin vector field with  each tensor element contribution
+        for (int i = 0; i < N; i++)
+        {   
+            double inner_sum = 0;
+            for (int m_alpha_idx = 0; m_alpha_idx < edge_orders[alpha]; m_alpha_idx++)
+            {   
+                int m_alpha = m_alpha_vec[m_alpha_idx];
+                if (c[m_alpha * N + i] != 0){
+                                //Gamma_{m_1, m_2, ...} * c_{m1,i} * k_{m1,i} * k_m1
+                    inner_sum += gamma[alpha] * c[m_alpha * N + i] * kmi[m_alpha*N + i] * k[m_alpha];
+                }
+            }
+            result[i] += inner_sum;
         }
     }
 }
