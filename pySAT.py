@@ -5,7 +5,7 @@
 #                                       #
 # Written by Áron Vízkeleti             #
 #       on 2021-10-10                   #
-#       last modified 2024-04-11        #
+#       last modified 2024-07-08        #
 #                                       #
 #########################################
 
@@ -34,7 +34,9 @@ RHS_TYPE_NINE = 9 #No aux of any kind
 RHS_TYPE_TEN = 10 #Second order memory, inefficient
 RHS_TYPE_ELEVEN = 11 #Second order memory, upper triangular matrix (not working)
 RHS_TYPE_TWELVE = 12 #Second order memory, graph based prune
-RHS_TYPE_THIRTEEN = 13 #Dynamic auxvariable selection
+RHS_TYPE_THIRTEEN = 13 #Second order dynamic auxvariable selection
+RHS_TYPE_FOURTEEN = 14 #Second order memory supression
+RHS_TYPE_FIFTEEN = 15 #Third order memory, graph based prune
 
 BIPARTITE_PLOT = 101
 SPRING_PLOT = 102
@@ -142,6 +144,9 @@ class SAT(Problem):
         self.alpha = None
         self.lmdb = lmbd
         self.G = G
+        self.flat_HG = None
+        self.HG_edge_orders = None
+
         if self.G is not None:
             self.number_of_auxvariables = len(list(self.G.edges))
         else:
@@ -210,6 +215,7 @@ class SAT(Problem):
             self.cSAT_functions.rhs9.restype = None
             self.cSAT_functions.rhs10.restype = None
             self.cSAT_functions.rhs11.restype = None
+            self.cSAT_functions.rhs15.restype = None
             # For debugging only
             self.cSAT_functions.jacobian1.restype = None
             self.cSAT_functions.jacobian2.restype = None
@@ -226,6 +232,9 @@ class SAT(Problem):
             self.cSAT_functions.precompute_km.restype = None
             self.cSAT_functions.precompute_km.argtypes = [c_int, c_int, POINTER(c_int), POINTER(c_double), POINTER(c_double)]
 
+            self.cSAT_functions.precompute_kmi.restype = None
+            self.cSAT_functions.precompute_kmi.argtypes = [c_int, c_int, POINTER(c_int), POINTER(c_double), POINTER(c_double)]
+
             self.cSAT_functions.get_Q.restype = None
             self.cSAT_functions.get_Q.argtypes = [c_int, c_int, POINTER(c_int), c_int, POINTER(c_int), POINTER(c_double), POINTER(c_double)]
 
@@ -237,6 +246,7 @@ class SAT(Problem):
         if not self.cSAT_functions:
             if self.rhs_type == RHS_TYPE_ONE:
                 self.rhs = self.rhs_type_one_py
+                self.Hessian = self.Hessian_type_two_py
             elif self.rhs_type == RHS_TYPE_TWO:
                 self.rhs = self.rhs_type_two_py
             elif self.rhs_type == RHS_TYPE_THREE:
@@ -261,9 +271,12 @@ class SAT(Problem):
                 self.rhs = self.rhs_type_twelve_py
             elif self.rhs_type == RHS_TYPE_THIRTEEN:
                 self.rhs = self.rhs_type_thirteen_py
+            elif self.rhs_type == RHS_TYPE_FIFTEEN:
+                self.rhs = self.rhs_type_fifteen_py
         else:
             if self.rhs_type == RHS_TYPE_ONE:
                 self.rhs = self.rhs_type_one_c
+                self.Hessian = self.Hessian_type_two_py
             elif self.rhs_type == RHS_TYPE_TWO:
                 self.rhs = self.rhs_type_two_c
             elif self.rhs_type == RHS_TYPE_THREE:
@@ -286,6 +299,8 @@ class SAT(Problem):
                 self.rhs = self.rhs_type_eleven_c
             elif self.rhs_type == RHS_TYPE_TWELVE:
                 self.rhs = self.rhs_type_twelve_c
+            elif self.rhs_type == RHS_TYPE_FIFTEEN:
+                self.rhs = self.rhs_type_fifteen_c
 
     def Jakobian(self, y):
         """Jakobian matrix of the CTDS"""
@@ -313,6 +328,10 @@ class SAT(Problem):
                 raise NotImplementedError
                 #self.cSAT_functions.jacobian2(self.number_of_variables, self.number_of_clauses, self.clause_matrix_pointer, state_pointer, result_pointer)
             return result.reshape([N_+M_, N_+M_])
+
+    def Hessian(self, t, y):
+        """Hessian of the time-dependent soft-spin potential, to be overwritten in runtime"""
+        pass
 
     def rhs(self, t, y):
         """Right-hand side of the differential equation defining the system, to be overwritten in runtime"""
@@ -350,22 +369,12 @@ class SAT(Problem):
 
         if k is not None:
             for j, edge in enumerate(list(self.G.edges)):
-                (m, n) = (edge[0] - N_, edge[1]- N_)
+                (m, n) = (edge[0], edge[1])
                 R[j] = k[m] * k[n]
-                # szorzat = k[m] * k[n]
-                # if szorzat <= 0.0:
-                #     R[j] = 0.0
-                # else:
-                #     R[j] = np.sqrt( szorzat )
         else:
             for j, edge in enumerate(list(self.G.edges)):
-                (m, n) = (edge[0] - N_, edge[1]- N_)
+                (m, n) = (edge[0], edge[1])
                 R[j] = self.K(m, s) * self.K(n, s)
-                # szorzat = self.K(m, s) * self.K(n, s)
-                # if szorzat <= 0.0:
-                #     R[j] = 0.0
-                # else:
-                #     R[j] = np.sqrt( szorzat )
             
         return R
 
@@ -418,6 +427,27 @@ class SAT(Problem):
                     pairs.append((m, n))
 
         return pairs
+
+    def set_hyper_graph(self, HG):
+        """A list of tuples encoding the hyper edges"""
+        self.HG = HG
+
+    def get_hyper_graph_edge_orders(self):
+        if not self.HG_edge_orders:
+            self.HG_edge_orders = [len(elem) for elem in self.HG]
+            return self.HG_edge_orders
+        else:
+            return self.HG_edge_orders
+
+    def get_flattened_hyper_graph(self):
+        if not self.flat_HG:
+            self.flat_HG = []
+            for m_tuple in self.HG:
+                for elem in m_tuple:
+                    self.flat_HG.append(elem)
+            return self.flat_HG
+        else:
+            return self.flat_HG
 
     def remove_variable(self, variable) -> None:
         """
@@ -752,6 +782,27 @@ class SAT(Problem):
         da = np.array([a[m]*(self.K(m, s)**2) for m in range(self.number_of_clauses)])
         return np.concatenate((ds, da), axis=None)
 
+    def Hessian_type_two_py(self, t, y):
+        N_ = self.number_of_variables
+        M_ = self.number_of_clauses
+        s = y[:N_]
+        a = y[N_:]
+
+        def delta(i, j):
+            if i == j:
+                return 1
+            else:
+                return 0
+
+        result = np.zeros((N_, N_))
+        for i in range(N_):
+            for j in range(N_):
+                matrix_element_ij = 0.0
+                for m in range(M_):
+                    matrix_element_ij += 2*a[m]*self.c[m, j]*self.c[m, i]*self.k(m, i, s)*self.k(m, j, s) *(2-delta(i, j))
+                result[i, j] = matrix_element_ij
+        return result
+
     def rhs_type_three_c(self, t, y):
         state = y.astype(np.double) # s & a
         state_pointer = state.ctypes.data_as(POINTER(c_double))
@@ -997,35 +1048,68 @@ class SAT(Problem):
         
         return np.concatenate((ds, da_), axis=None)
 
-    def rhs_type_fourteen_c(self, t, y):
+    def rhs_type_fifteen_c(self, t, y):
         N_ = self.number_of_variables
         M_ = self.number_of_clauses
 
-        s = y[:N_]
-        b = y[N_:]
+        state = y.astype(np.double)
+        state_pointer = state.ctypes.data_as(POINTER(c_double))
 
-        k = np.empty(M_, dtype=np.double)
-        k_pointer = k.ctypes.data_as(POINTER(c_double))
-
-        state = s.astype(np.double)
-        s_pointer = state.ctypes.data_as(POINTER(c_double))
-
-        self.cSAT_functions.precompute_km(N_, M_, self.clause_matrix_pointer, s_pointer, k_pointer)
-
-        edges = np.array(list(self.G.edges))
+        edges = np.array(self.get_flattened_hyper_graph())
         edges_pointer = edges.flatten().astype(np.int32).ctypes.data_as(POINTER(c_int))
 
+        edge_orders = np.array(self.get_hyper_graph_edge_orders())
+        edge_orders_pointer = edge_orders.flatten().astype(np.int32).ctypes.data_as(POINTER(c_int))
+
         L = len(edges)
-        Q_c = np.empty( (N_, L) )
-        Q_c = Q_c.astype(np.double)
-        Q_pointer = Q_c.ctypes.data_as(POINTER(c_double))
+        nbr_edge_orders = len(edge_orders)
 
-        self.cSAT_functions.get_Q(N_, M_, self.clause_matrix_pointer, L, edges_pointer, s_pointer, k_pointer, Q_pointer)
+        result = np.zeros(y.shape)
+        result = result.astype(np.double)
+        result_pointer = result.ctypes.data_as(POINTER(c_double))
 
-        ds = Q_c @ b # Matrix vector multiplication
-        db = self.get_R(s, k) * b # Elementwise multiplication
+        self.cSAT_functions.rhs15(N_, M_, self.clause_matrix_pointer, state_pointer, nbr_edge_orders, edge_orders_pointer, L, edges_pointer, result_pointer)
+        
+        return result
 
-        return np.concatenate((ds, db), axis=None)
+    def rhs_type_fifteen_py(self, t, y):
+        result = np.zeros(y.shape)
+        N = self.number_of_variables
+        s = y[:N]
+        gamma = y[N:]
+        edge_orders = self.get_hyper_graph_edge_orders()
+        edges = self.get_flattened_hyper_graph()
+
+        # Flat index that runs over all tensor element indices
+        overall_index = 0
+
+        # Loop that runs over all hyper edges
+        for alpha in range(len(edge_orders)):
+            # Get the relevant indices in an array m_1, m_2, ...
+            m_alpha_vec = np.zeros(edge_orders[alpha], dtype=int)
+            # Calculate the product K_m1 * K_m2 * ...
+            productum = 1.0
+
+            for m_alpha_idx in range(edge_orders[alpha]):
+                m_alpha_vec[m_alpha_idx] = edges[overall_index]  # This is m_alpha
+                #print(edges[overall_index])
+                productum *= self.K(edges[overall_index], s)  # This is k_{m_alpha}
+                overall_index += 1
+
+            # Update tensor element vector field
+            # d/dt Gamma_alpha = Gamma_alpha * K_m1 * K_m2 * ...
+            result[N + alpha] = gamma[alpha] * productum
+
+            # Update the soft-spin vector field with each tensor element contribution
+            for i in range(N):
+                inner_sum = 0
+                for m_alpha_idx in range(edge_orders[alpha]):
+                    m_alpha = m_alpha_vec[m_alpha_idx]
+                    if self.c[m_alpha, i] != 0:
+                        # Gamma_{m_1, m_2, ...} * c_{m1,i} * k_{m1,i} * k_m1
+                        inner_sum += gamma[alpha] * self.c[m_alpha, i] * self.k(m_alpha, i, s) * self.K(m_alpha, s)
+                result[i] += inner_sum
+        return result
 
 #Numerical solver definition(s)
 
@@ -1054,6 +1138,11 @@ class CTD:
                     self.state = np.ones(N + len(list(problem.G.edges)))
                 else:
                     raise ValueError("No pruning graph given, consider using RHS_TYPE_TEN")
+            elif self.problem.rhs_type == RHS_TYPE_FIFTEEN:
+                if self.problem.HG is not None:
+                    self.state = np.ones(N + len(self.problem.get_hyper_graph_edge_orders()))
+                else:
+                    raise ValueError("No hyper graph given, consider your mistakes in life")
             elif self.problem.rhs_type == RHS_TYPE_THIRTEEN:
                 self.state = np.empty(N+self.problem.number_of_auxvariables)
                 y = np.concatenate((initial_s, initial_baux[0] * np.ones(M)), axis=None)
@@ -1061,6 +1150,9 @@ class CTD:
                     self.problem.G = Data_holder()
                     self.problem.G.edges = []
                 self.problem.G.edges = ((self.problem.rhs_type_three_py(0.0, y)[N:]).argsort())[:self.problem.number_of_auxvariables-1]
+            
+            
+            
             if initial_baux is not None:
                 self.state[N:] = initial_baux
             
@@ -1144,7 +1236,7 @@ class CTD:
             for coord in y[:self.problem.number_of_variables]:
                 if coord < 1:
                     return 1.0
-                print("Trajectory left hypercube!")
+                #print("Trajectory left hypercube!")
                 return -1.0
         exit_hypercube.terminal = False
 
@@ -1440,6 +1532,46 @@ class CTD:
         result_instance.sol.t = t
 
         return result_instance
+    
+    @classmethod
+    def load_sol_from_files(cls, y_file1, y_file2, SAT_problem, solver_type='BDF'):
+        t_values = []
+        y_values_combined = []
+
+        with open(y_file1, 'r') as y_file1_obj, open(y_file2, 'r') as y_file2_obj:
+            for line1, line2 in zip(y_file1_obj, y_file2_obj):
+                t_values.append(float(line1.strip().split('\t')[1]))
+                y_values_1 = np.array([float(val) for val in line1.strip().split('\t')[2:]])
+                y_values_2 = np.array([float(val) for val in line2.strip().split('\t')[2:]])
+                y_values_combined.append(np.concatenate((y_values_1, y_values_2)))
+
+        t_values = np.array(t_values)
+        y_values_combined = np.array(y_values_combined).T  # Transpose for correct shape
+
+        result_instance = cls(SAT_problem)
+
+        result_instance.sol = solve_ivp(fun=lambda tl, yl: np.zeros(len(yl)), t_span=(t_values[0], t_values[-1]), t_eval=None, y0=result_instance.state, method=solver_type)
+
+        result_instance.sol.y = y_values_combined
+        result_instance.sol.t = t_values
+
+        return result_instance
+
+    def get_Hessian_evolution(self, t_min=0.0, t_max = None):
+        """Returns a list of touples (t, H) for each time instance t a matrix of size N (nbr_of_variables), that is calcualted using the Hessian function of problem"""
+        N = self.problem.number_of_variables
+        M = self.problem.number_of_clauses
+
+        result = []
+        for t_idx, t in enumerate(self.sol.t):
+            if t < t_max and t > t_min:
+                y = self.sol.y[:, t_idx]
+                result.append((t, self.problem.Hessian(t, y)))
+                print(t_idx)
+
+        return result
+
+
 
 class Warning_propagator:
     def __init__(self, SAT_problem) -> None:
@@ -1608,6 +1740,19 @@ class Warning_propagator:
                 G.add_edge(m, n)
 
         return G
+
+    def generate_random_hypergraph(self, nbr_edges, max_order):
+        hypergraph = []
+        edge_set = set()
+
+        while len(hypergraph) < nbr_edges:
+            edge_length = randint(1, max_order)
+            edge = tuple(sample(range(self.problem.number_of_clauses), edge_length))
+            if edge not in edge_set:
+                edge_set.add(edge)
+                hypergraph.append(edge)
+        
+        return hypergraph
 
     def get_k_core_graph(self, graph, k):
         """Wrapper for networkx function k_core"""
