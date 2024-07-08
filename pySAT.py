@@ -36,7 +36,7 @@ RHS_TYPE_ELEVEN = 11 #Second order memory, upper triangular matrix (not working)
 RHS_TYPE_TWELVE = 12 #Second order memory, graph based prune
 RHS_TYPE_THIRTEEN = 13 #Second order dynamic auxvariable selection
 RHS_TYPE_FOURTEEN = 14 #Second order memory supression
-RHS_TYPE_FIFTEEN = 15 #Third order memory, graph based prune
+RHS_TYPE_FIFTEEN = 15 #Arbitrary order memory, graph based prune
 
 BIPARTITE_PLOT = 101
 SPRING_PLOT = 102
