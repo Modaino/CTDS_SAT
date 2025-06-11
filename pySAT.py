@@ -5,13 +5,13 @@
 #                                       #
 # Written by Áron Vízkeleti             #
 #       on 2021-10-10                   #
-#       last modified 2024-07-08        #
+#       last modified 2024-01-09        #
 #                                       #
 #########################################
 
 from math import sqrt, pi, sin
 import numpy as np
-from random import sample, randint, random, getrandbits
+from random import sample, randint, random, getrandbits, choices
 from scipy.integrate import solve_ivp
 from ctypes import CDLL, POINTER, c_double, c_int, c_char
 
@@ -269,6 +269,7 @@ class SAT(Problem):
                 self.rhs = self.rhs_type_eleven_py
             elif self.rhs_type == RHS_TYPE_TWELVE:
                 self.rhs = self.rhs_type_twelve_py
+                self.Hessian = self.Hessian_type_twelve_py
             elif self.rhs_type == RHS_TYPE_THIRTEEN:
                 self.rhs = self.rhs_type_thirteen_py
             elif self.rhs_type == RHS_TYPE_FIFTEEN:
@@ -299,6 +300,7 @@ class SAT(Problem):
                 self.rhs = self.rhs_type_eleven_c
             elif self.rhs_type == RHS_TYPE_TWELVE:
                 self.rhs = self.rhs_type_twelve_c
+                self.Hessian = self.Hessian_type_twelve_py
             elif self.rhs_type == RHS_TYPE_FIFTEEN:
                 self.rhs = self.rhs_type_fifteen_c
 
@@ -746,6 +748,28 @@ class SAT(Problem):
         else:
             return False
             
+    def write_bmn_version_to_file(self, name):
+        """Generates cnf file of the B_mn version of the problem, by creating clauses for all possible combinations."""
+        new_clauses = []
+        for (i, clause_i) in enumerate(self.clauses):
+            for (j, clause_j) in enumerate(self.clauses):
+                if i >= j:
+                    new_clauses.append(clause_i+clause_j)
+
+
+
+        file_name = name + ".cnf"
+        lines = []
+        lines.append('p cnf ' + str(self.number_of_variables)+" "+str(len(new_clauses)) + '\n')
+        for clause in new_clauses:
+            myLine = ""
+            for elem in clause:
+                myLine += str(elem) + " "
+            lines.append(myLine + '0\n')
+
+        with open(file_name, 'w') as mFile:
+            mFile.writelines(lines)
+
     # RHS funcitons
     
     def rhs_type_one_c(self, t, y):
@@ -793,13 +817,21 @@ class SAT(Problem):
                 return 1
             else:
                 return 0
+    
+        state = s.astype(np.double)
+        s_pointer = state.ctypes.data_as(POINTER(c_double))
+        
+        kmi = np.empty((M_, N_))
+        for m in range(M_):
+            for i in range(N_):
+                kmi[m, i] = self.cSAT_functions.k_mi(m, i, s_pointer, self.clause_matrix_pointer, N_)
 
         result = np.zeros((N_, N_))
         for i in range(N_):
             for j in range(N_):
                 matrix_element_ij = 0.0
                 for m in range(M_):
-                    matrix_element_ij += 2*a[m]*self.c[m, j]*self.c[m, i]*self.k(m, i, s)*self.k(m, j, s) *(2-delta(i, j))
+                    matrix_element_ij += 2*a[m]*self.c[m, j]*self.c[m, i]*kmi[m, i]*kmi[m, j] *(2-delta(i, j))
                 result[i, j] = matrix_element_ij
         return result
 
@@ -1020,6 +1052,46 @@ class SAT(Problem):
         db = self.get_R(s, k) * b # Elementwise multiplication
 
         return np.concatenate((ds, db), axis=None)
+
+    def Hessian_type_twelve_py(self, t, y):
+        N_ = self.number_of_variables
+        M_ = self.number_of_clauses
+        s = y[:N_]
+        b = y[N_:]
+
+        k = np.empty(M_, dtype=np.double)
+        k_pointer = k.ctypes.data_as(POINTER(c_double))
+        state = s.astype(np.double)
+        s_pointer = state.ctypes.data_as(POINTER(c_double))
+        self.cSAT_functions.precompute_km(N_, M_, self.clause_matrix_pointer, s_pointer, k_pointer)
+
+        kmij = np.empty((M_, N_, N_))
+        for m in range(M_):
+            for i in range(N_):
+                for j in range(N_):
+                    kmij[m, i, j] = self.cSAT_functions.k_mij(m, i, j, s_pointer, self.clause_matrix_pointer, N_)
+
+        kmi = np.empty((M_, N_))
+        for m in range(M_):
+            for i in range(N_):
+                    kmi[m, i] = self.cSAT_functions.k_mi(m, i, s_pointer, self.clause_matrix_pointer, N_)
+
+        def delta(i, j):
+            if i == j:
+                return 1
+            else:
+                return 0
+
+        result = np.zeros((N_, N_))
+        for i in range(N_):
+            for j in range(N_):
+                matrix_element_ij = 0.0
+                for alpha, edge in enumerate(list(self.G.edges)):
+                    (m, n) = (edge[0], edge[1])
+                    matrix_element_ij += 2*b[alpha]*self.c[m, j]*self.c[m, i]*kmij[m, i, j]*k[n] *(2-delta(i, j))
+                    #matrix_element_ij += 2*b[alpha]*self.c[m, i]*( self.c[m, j]* (1-delta(i, j)) * kmij[m, i, j] *k[n]+ self.c[n, j]*kmi[n, i]*kmi[m, j] )
+                result[i, j] = matrix_element_ij
+        return result
 
     def rhs_type_thirteen_py(self, t, y):
         N_ = self.number_of_variables
@@ -1511,6 +1583,7 @@ class CTD:
 
         t = np.array(data.get("t"))
         y = np.array(data.get("y"))
+        extra_data = data.get("extra_data", [])
         
         if SAT_problem.rhs_type == RHS_TYPE_TWELVE:
             import networkx as nx
@@ -1530,6 +1603,7 @@ class CTD:
         # Override self.sol.y with loaded y to include all columns
         result_instance.sol.y = y
         result_instance.sol.t = t
+        result_instance.extra_data = extra_data
 
         return result_instance
     
@@ -1741,17 +1815,42 @@ class Warning_propagator:
 
         return G
 
-    def generate_random_hypergraph(self, nbr_edges, max_order):
+    def generate_random_hypergraph(self, nbr_edges, max_order, average_edge_order=None):
         hypergraph = []
         edge_set = set()
 
         while len(hypergraph) < nbr_edges:
-            edge_length = randint(1, max_order)
+            if average_edge_order is None:
+                edge_length = randint(1, max_order)
+            else:
+                edge_length = int(np.random.normal(average_edge_order + 0.5, 0.5))
+                # Ensure edge_length is within the valid range
+                edge_length = max(1, min(edge_length, max_order))
+
             edge = tuple(sample(range(self.problem.number_of_clauses), edge_length))
             if edge not in edge_set:
                 edge_set.add(edge)
                 hypergraph.append(edge)
-        
+
+        return hypergraph
+    
+    def generate_brain_like_hypergraph(self, nbr_edges):
+        hypergraph = []
+        edge_set = set()
+
+        # Define the probabilities for each edge length
+        probabilities = [0.6, 0.25, 0.1, 0.03, 0.02, 0.0]  # Adjusted for sum to 1
+        edge_lengths = [2, 3, 4, 5, 6]  # Considering the range of observed edge lengths
+
+        while len(hypergraph) < nbr_edges:
+            # Choose edge length based on defined probabilities
+            edge_length = choices(edge_lengths, probabilities)[0]
+            
+            edge = tuple(sample(range(self.problem.number_of_clauses), edge_length))
+            if edge not in edge_set:
+                edge_set.add(edge)
+                hypergraph.append(edge)
+
         return hypergraph
 
     def get_k_core_graph(self, graph, k):
