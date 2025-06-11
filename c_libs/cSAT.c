@@ -2,7 +2,7 @@
  *          C\C++ library for CTDS simulations             *
  *                                                         *
  *         Written by Aron Vizkeleti on 2021-12-10         *
- *               last modified 2024-07-08                  *
+ *               last modified 2025-01-08                  *
  *                                                         *
  *      to compile use:                                    *
  *      cc -std=c99 -fPIC -shared -o cSAT.so cSAT.c        *
@@ -45,6 +45,17 @@ double k_mi(int m, int i, double s[], int c[], int number_of_variables){
     {   
         if (i != j){
             productum *= (1 - c[m*number_of_variables + j] * s[j]);
+        }
+    }    
+    return 0.125 * productum; // only for 3SAT 0.125 = 2^-3
+}
+
+double k_mij(int m, int i, int j, double s[], int c[], int number_of_variables){
+    double productum = 1.0;
+    for (int idx = 0; idx < number_of_variables; idx++)
+    {   
+        if (i != idx && j != idx){
+            productum *= (1 - c[m*number_of_variables + idx] * s[idx]);
         }
     }    
     return 0.125 * productum; // only for 3SAT 0.125 = 2^-3
